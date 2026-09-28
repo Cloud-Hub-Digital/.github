@@ -1,0 +1,8 @@
+# Repository-specific ownership. This file is not inherited.
+* @Cloud-Hub-Digital/repository-governance
+
+/.github/ @Cloud-Hub-Digital/repository-governance
+/CODE_OF_CONDUCT.md @Cloud-Hub-Digital/repository-governance
+/CONTRIBUTING.md @Cloud-Hub-Digital/repository-governance
+/SECURITY.md @Cloud-Hub-Digital/repository-governance
+/SUPPORT.md @Cloud-Hub-Digital/repository-governance
