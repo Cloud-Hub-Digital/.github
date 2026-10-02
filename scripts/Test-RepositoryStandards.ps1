@@ -52,28 +52,73 @@ catch { throw 'The .repository-standards.json file is invalid JSON.' }
 foreach ($property in @($config.PSObject.Properties.Name)) {
     if ($property -notin @('schemaVersion', 'profile', 'account', 'centralRepository', 'licence', 'supportRoute', 'conductRoute')) { throw "Unsupported repository-standards property: $property" }
 }
-if ($config.schemaVersion -ne 1) { throw 'The repository-standards schema is unsupported.' }
+if ($config.schemaVersion -ne 2) { throw 'The repository-standards schema must be version 2.' }
 $profile = [string]$config.profile
 if ($profile -notin @('account-default', 'downstream')) { throw 'The repository-standards profile must be account-default or downstream.' }
 $account = [string]$config.account
 if (-not $account -or $account -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$') { throw 'The repository-standards account is unresolved or invalid.' }
 $centralRepository = [string]$config.centralRepository
 if ($centralRepository -ne "https://github.com/$account/.github") { throw 'The centralRepository must identify the account public .github repository.' }
-foreach ($name in @('licence', 'supportRoute', 'conductRoute')) {
+foreach ($name in @('supportRoute', 'conductRoute')) {
     if (-not $config.PSObject.Properties[$name] -or -not ([string]$config.$name).Trim()) { throw "The repository-standards $name input is unresolved." }
+}
+if (-not $config.PSObject.Properties['licence'] -or $null -eq $config.licence -or $config.licence -isnot [pscustomobject]) { throw 'The approved project licence decision is missing.' }
+$allowedLicenceProperties = @('class', 'identifier', 'rightsHolder', 'decisionStatus', 'templateVersion', 'overrideReason')
+foreach ($property in @($config.licence.PSObject.Properties.Name)) {
+    if ($property -notin $allowedLicenceProperties) { throw "Unsupported licence decision property: $property" }
+}
+$licenceClass = if ($config.licence.PSObject.Properties['class']) { ([string]$config.licence.class).Trim() } else { '' }
+$licenceIdentifier = if ($config.licence.PSObject.Properties['identifier']) { ([string]$config.licence.identifier).Trim() } else { '' }
+$licenceRightsHolder = if ($config.licence.PSObject.Properties['rightsHolder']) { ([string]$config.licence.rightsHolder).Trim() } else { '' }
+$licenceDecisionStatus = if ($config.licence.PSObject.Properties['decisionStatus']) { ([string]$config.licence.decisionStatus).Trim() } else { '' }
+if ($licenceClass -notin @('open-source', 'proprietary')) { throw 'The approved licence class must be open-source or proprietary.' }
+if (-not $licenceIdentifier) { throw 'The approved licence identifier is missing.' }
+if (-not $licenceRightsHolder) { throw 'The approved licence rights holder is missing.' }
+if ($licenceDecisionStatus -ne 'approved') { throw 'The project licence decision is unresolved or not approved.' }
+if ($licenceClass -eq 'open-source') {
+    if (($config.licence.PSObject.Properties['templateVersion'] -and $null -ne $config.licence.templateVersion) -or ($config.licence.PSObject.Properties['overrideReason'] -and $null -ne $config.licence.overrideReason)) { throw 'An open-source licence decision must not define a proprietary template or override.' }
+}
+if ($licenceClass -eq 'proprietary') {
+    if ($licenceIdentifier -notmatch '^LicenseRef-[A-Za-z0-9.-]+$') { throw 'A proprietary licence must use a valid LicenseRef identifier.' }
+    if (-not $config.licence.PSObject.Properties['templateVersion'] -or -not ([string]$config.licence.templateVersion).Trim()) { throw 'A proprietary licence template version is missing.' }
 }
 
 $errors = [Collections.Generic.List[string]]::new()
 $tracked = @(Get-TrackedPaths $root)
-$lifecycleNames = @('AGENTS.md', 'PROJECT.md', 'GOALS.md', 'STATUS.md', 'DECISIONS.md', 'HANDOFFS.md')
+$lifecycleNames = @('PROJECT.md', 'GOALS.md', 'STATUS.md', 'DECISIONS.md', 'HANDOFFS.md')
 foreach ($path in $tracked) {
     if ([IO.Path]::GetFileName($path) -in $lifecycleNames) { $errors.Add("Private lifecycle file is repository-visible: $path") }
 }
 
-$requiredLocal = @('README.md', 'CHANGELOG.md', '.gitignore', '.github/CODEOWNERS', '.github/dependabot.yml', '.repository-standards.json')
+$requiredLocal = @('AGENTS.md', 'README.md', 'CHANGELOG.md', '.gitignore', '.github/CODEOWNERS', '.github/dependabot.yml', '.repository-standards.json')
 foreach ($path in $requiredLocal) { if (-not (Test-Path -LiteralPath (Join-Path $root $path) -PathType Leaf)) { $errors.Add("Required repository-local file is missing: $path") } }
 $licenceFiles = @(Get-ChildItem -LiteralPath $root -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(LICENSE|LICENCE)(\..+)?$' })
 if ($licenceFiles.Count -eq 0) { $errors.Add('A repository-local licence file is missing.') }
+
+$agentsPath = Join-Path $root 'AGENTS.md'
+if (Test-Path -LiteralPath $agentsPath -PathType Leaf) {
+    $agentsText = [IO.File]::ReadAllText($agentsPath)
+    $agentsFirstLine = Get-FirstLine $agentsPath
+    $requiredAgentMarkerValues = @('schema=1', 'standard=Repository Standards', 'version=1.1.0', 'scope=local-required', 'source=local')
+    if (-not $agentsFirstLine -or -not $agentsFirstLine.StartsWith('<!-- repository-standard:', [StringComparison]::Ordinal)) {
+        $errors.Add('AGENTS.md does not start with the required repository-standard provenance marker.')
+    } else {
+        foreach ($value in $requiredAgentMarkerValues) {
+            if (-not $agentsFirstLine.Contains($value, [StringComparison]::Ordinal)) { $errors.Add("AGENTS.md provenance marker is missing: $value") }
+        }
+    }
+    if ([regex]::Matches($agentsText, '(?m)^## Code Review Rules\s*$').Count -ne 1) { $errors.Add('AGENTS.md must contain exactly one Code Review Rules section.') }
+    $specificMatches = [regex]::Matches($agentsText, '(?m)^## Repository-Specific Review Rules\s*$')
+    if ($specificMatches.Count -ne 1) {
+        $errors.Add('AGENTS.md must contain exactly one Repository-Specific Review Rules section.')
+    } else {
+        $specificStart = $specificMatches[0].Index + $specificMatches[0].Length
+        $nextHeading = [regex]::Match($agentsText.Substring($specificStart), '(?m)^##\s+')
+        $specificBody = if ($nextHeading.Success) { $agentsText.Substring($specificStart, $nextHeading.Index) } else { $agentsText.Substring($specificStart) }
+        if ($specificBody -notmatch '(?m)^-\s+\S') { $errors.Add('AGENTS.md must contain at least one repository-specific review rule.') }
+    }
+    if ($agentsText -match '\{\{[^}]+\}\}') { $errors.Add('AGENTS.md contains an unresolved template placeholder.') }
+}
 
 $ignorePath = Join-Path $root '.gitignore'
 if (Test-Path -LiteralPath $ignorePath -PathType Leaf) {
